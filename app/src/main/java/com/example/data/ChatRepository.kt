@@ -55,6 +55,10 @@ class ChatRepository(
         settingsDao.getSettingsOnce() ?: AppSettings()
     }
 
+    suspend fun fetchOllamaModels(baseUrlStr: String, improveCompat: Boolean): Result<List<String>> {
+        return AiService.fetchOllamaModels(baseUrlStr, improveCompat)
+    }
+
     /**
      * Sends a message to the active AI service, handling local storage of images if attached,
      * database record persistence, and loading chat history for context.

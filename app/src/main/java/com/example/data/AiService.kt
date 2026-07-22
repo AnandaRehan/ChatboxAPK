@@ -794,4 +794,91 @@ object AiService {
             null
         }
     }
+
+    suspend fun fetchOllamaModels(baseUrlStr: String, improveCompat: Boolean): Result<List<String>> = withContext(Dispatchers.IO) {
+        try {
+            val trimmedUrl = baseUrlStr.trim()
+            if (trimmedUrl.isEmpty()) {
+                return@withContext Result.failure(Exception("URL API Host masih kosong"))
+            }
+
+            val uri = try { java.net.URI(trimmedUrl) } catch (e: Exception) { null }
+            val hostBase = if (uri != null && uri.scheme != null && uri.host != null) {
+                val portStr = if (uri.port != -1) ":${uri.port}" else ""
+                "${uri.scheme}://${uri.host}$portStr"
+            } else {
+                trimmedUrl.replace(Regex("/v1/chat/completions/?$"), "")
+                    .replace(Regex("/api/chat/?$"), "")
+                    .removeSuffix("/")
+            }
+
+            val endpoints = mutableListOf<String>()
+            
+            // If user inputted full path like http://127.0.0.1:8080/v1/chat/completions
+            if (trimmedUrl.contains("/v1/chat/completions")) {
+                endpoints.add(trimmedUrl.replace("/v1/chat/completions", "/v1/models"))
+            }
+            endpoints.add("$hostBase/api/tags")
+            endpoints.add("$hostBase/v1/models")
+            endpoints.add("$hostBase/models")
+
+            val httpClient = getOkHttpClient(improveCompat)
+
+            for (endpoint in endpoints.distinct()) {
+                try {
+                    val reqBuilder = Request.Builder()
+                        .url(endpoint)
+                        .get()
+
+                    if (improveCompat) {
+                        reqBuilder.addHeader("User-Agent", "Mozilla/5.0 (Android; Mobile)")
+                        reqBuilder.addHeader("Accept", "*/*")
+                        reqBuilder.addHeader("Connection", "keep-alive")
+                    }
+
+                    httpClient.newCall(reqBuilder.build()).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val bodyStr = response.body?.string() ?: ""
+                            val json = JSONObject(bodyStr)
+                            val resultList = mutableListOf<String>()
+
+                            // 1. Ollama format: { "models": [ { "name": "llama3:latest" }, ... ] }
+                            val modelsArr = json.optJSONArray("models")
+                            if (modelsArr != null) {
+                                for (i in 0 until modelsArr.length()) {
+                                    val item = modelsArr.optJSONObject(i)
+                                    val name = item?.optString("name") ?: item?.optString("model") ?: item?.optString("id")
+                                    if (!name.isNullOrBlank() && !resultList.contains(name)) {
+                                        resultList.add(name)
+                                    }
+                                }
+                            }
+
+                            // 2. OpenAI format: { "data": [ { "id": "llama-3.2-3b" }, ... ] }
+                            val dataArr = json.optJSONArray("data")
+                            if (dataArr != null) {
+                                for (i in 0 until dataArr.length()) {
+                                    val item = dataArr.optJSONObject(i)
+                                    val id = item?.optString("id") ?: item?.optString("name")
+                                    if (!id.isNullOrBlank() && !resultList.contains(id)) {
+                                        resultList.add(id)
+                                    }
+                                }
+                            }
+
+                            if (resultList.isNotEmpty()) {
+                                return@withContext Result.success(resultList)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Failed fetching models from $endpoint: ${e.message}")
+                }
+            }
+
+            return@withContext Result.failure(Exception("Tidak dapat mengambil model dari $trimmedUrl. Pastikan server lokal berjalan."))
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+    }
 }

@@ -268,6 +268,10 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
             }
         }
     }
+
+    suspend fun fetchOllamaModels(baseUrl: String, improveCompat: Boolean): Result<List<String>> {
+        return repository.fetchOllamaModels(baseUrl, improveCompat)
+    }
 }
 
 class ChatViewModelFactory(private val context: Context) : ViewModelProvider.Factory {

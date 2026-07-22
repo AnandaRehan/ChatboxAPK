@@ -8,6 +8,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -391,6 +392,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     if (isSettingsOpen) {
         SettingsDialog(
             settings = settings,
+            viewModel = viewModel,
             onDismiss = { viewModel.setSettingsOpen(false) },
             onSave = { updatedSettings ->
                 viewModel.updateSettings(updatedSettings)
@@ -1356,6 +1358,7 @@ fun ChatInputBox(
 @Composable
 fun SettingsDialog(
     settings: AppSettings,
+    viewModel: ChatViewModel,
     onDismiss: () -> Unit,
     onSave: (AppSettings) -> Unit
 ) {
@@ -1366,6 +1369,13 @@ fun SettingsDialog(
     var ollamaBaseUrl by remember { mutableStateOf(settings.ollamaBaseUrl) }
     var ollamaModelName by remember { mutableStateOf(settings.ollamaModelName) }
     var ollamaImproveNetworkCompat by remember { mutableStateOf(settings.ollamaImproveNetworkCompat) }
+
+    var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isFetchingModels by remember { mutableStateOf(false) }
+    var showModelsBottomSheet by remember { mutableStateOf(false) }
+    var showAddNewModelDialog by remember { mutableStateOf(false) }
+    var newModelInput by remember { mutableStateOf("") }
+    var modelSearchQuery by remember { mutableStateOf("") }
     
     var customBaseUrl by remember { mutableStateOf(settings.customBaseUrl) }
     var customApiKey by remember { mutableStateOf(settings.customApiKey) }
@@ -1524,29 +1534,22 @@ fun SettingsDialog(
                         "ollama" -> {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Text(
-                                    text = "KONFIGURASI OLLAMA (LOCAL AI)",
-                                    fontSize = 12.sp,
+                                    text = "Ollama",
+                                    fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
+
                                 OutlinedTextField(
                                     value = ollamaBaseUrl,
                                     onValueChange = { ollamaBaseUrl = it },
-                                    label = { Text("Base URL Ollama") },
-                                    placeholder = { Text("Contoh: http://10.0.2.2:11434") },
+                                    label = { Text("API Host") },
+                                    placeholder = { Text("http://127.0.0.1:8080") },
+                                    supportingText = { Text("http://127.0.0.1:8080/v1/chat/completions") },
                                     singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp)
                                 )
-                                OutlinedTextField(
-                                    value = ollamaModelName,
-                                    onValueChange = { ollamaModelName = it },
-                                    label = { Text("Nama Model Lokal") },
-                                    placeholder = { Text("Contoh: llama3, mistral, phi3") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-
-                                Spacer(modifier = Modifier.height(4.dp))
 
                                 Row(
                                     modifier = Modifier
@@ -1565,7 +1568,7 @@ fun SettingsDialog(
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Text(
-                                            text = "Abaikan SSL, paksa HTTP/1.1 & tambahkan header kustom untuk koneksi lokal/Termux/tunnel",
+                                            text = "Abaikan SSL, paksa HTTP/1.1 & tambahkan header kustom untuk koneksi Termux / Local Host",
                                             fontSize = 11.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -1574,6 +1577,167 @@ fun SettingsDialog(
                                         checked = ollamaImproveNetworkCompat,
                                         onCheckedChange = { ollamaImproveNetworkCompat = it }
                                     )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Model",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // + New
+                                        OutlinedButton(
+                                            onClick = {
+                                                newModelInput = ""
+                                                showAddNewModelDialog = true
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(34.dp),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("New", fontSize = 12.sp)
+                                        }
+
+                                        // Reset
+                                        OutlinedButton(
+                                            onClick = {
+                                                ollamaModelName = "llama3"
+                                                Toast.makeText(context, "Model di-reset ke default", Toast.LENGTH_SHORT).show()
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(34.dp),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Reset", fontSize = 12.sp)
+                                        }
+
+                                        // Fetch
+                                        Button(
+                                            onClick = {
+                                                if (ollamaBaseUrl.trim().isEmpty()) {
+                                                    Toast.makeText(context, "Isi API Host terlebih dahulu", Toast.LENGTH_SHORT).show()
+                                                    return@Button
+                                                }
+                                                isFetchingModels = true
+                                                coroutineScope.launch {
+                                                    val result = viewModel.fetchOllamaModels(ollamaBaseUrl, ollamaImproveNetworkCompat)
+                                                    isFetchingModels = false
+                                                    result.onSuccess { models ->
+                                                        fetchedModels = models
+                                                        showModelsBottomSheet = true
+                                                        Toast.makeText(context, "Berhasil menemukan ${models.size} model", Toast.LENGTH_SHORT).show()
+                                                    }.onFailure { err ->
+                                                        Toast.makeText(context, "Gagal fetch model: ${err.message}", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            },
+                                            enabled = !isFetchingModels,
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(34.dp),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            if (isFetchingModels) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(14.dp),
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    strokeWidth = 2.dp
+                                                )
+                                            } else {
+                                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Fetch", fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable {
+                                            if (fetchedModels.isNotEmpty()) {
+                                                showModelsBottomSheet = true
+                                            } else {
+                                                if (ollamaBaseUrl.trim().isNotEmpty()) {
+                                                    isFetchingModels = true
+                                                    coroutineScope.launch {
+                                                        val result = viewModel.fetchOllamaModels(ollamaBaseUrl, ollamaImproveNetworkCompat)
+                                                        isFetchingModels = false
+                                                        result.onSuccess { models ->
+                                                            fetchedModels = models
+                                                            showModelsBottomSheet = true
+                                                        }.onFailure {
+                                                            showModelsBottomSheet = true
+                                                        }
+                                                    }
+                                                } else {
+                                                    showModelsBottomSheet = true
+                                                }
+                                            }
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                                    ),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (ollamaModelName.isNotEmpty()) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "Model Aktif",
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                    Text(
+                                                        text = ollamaModelName,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                                Icon(
+                                                    imageVector = Icons.Default.ArrowDropDown,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        } else {
+                                            Text(
+                                                text = "No models available",
+                                                fontSize = 14.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1746,6 +1910,233 @@ fun SettingsDialog(
                         onSave(updated)
                     }) {
                         Text("Simpan & Tutup")
+                    }
+                }
+            }
+        }
+    }
+
+    if (showModelsBottomSheet) {
+        Dialog(onDismissRequest = { showModelsBottomSheet = false }) {
+            Card(
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(36.dp)
+                                .height(4.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                        )
+                    }
+
+                    Text(
+                        text = "Models",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+
+                    OutlinedTextField(
+                        value = modelSearchQuery,
+                        onValueChange = { modelSearchQuery = it },
+                        placeholder = { Text("Search models...") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        },
+                        trailingIcon = if (modelSearchQuery.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { modelSearchQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = null)
+                                }
+                            }
+                        } else null,
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    val filteredModels = remember(fetchedModels, ollamaModelName, modelSearchQuery) {
+                        val allList = if (fetchedModels.isEmpty() && ollamaModelName.isNotEmpty()) {
+                            listOf(ollamaModelName)
+                        } else {
+                            fetchedModels
+                        }
+                        if (modelSearchQuery.isBlank()) allList
+                        else allList.filter { it.contains(modelSearchQuery, ignoreCase = true) }
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (filteredModels.isEmpty()) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(24.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = if (fetchedModels.isEmpty()) "Tidak ada model ditemukan. Tekan 'Fetch' untuk memuat." else "Model tidak ditemukan",
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        } else {
+                            items(filteredModels) { modelItem ->
+                                val isSelected = modelItem == ollamaModelName
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable {
+                                            ollamaModelName = modelItem
+                                            showModelsBottomSheet = false
+                                            Toast.makeText(context, "Model dipilih: $modelItem", Toast.LENGTH_SHORT).show()
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                                         else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                                    ),
+                                    border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = modelItem,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+
+                                        Box(
+                                            modifier = Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (isSelected) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.surfaceVariant
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isSelected) Icons.Default.Check else Icons.Default.Add,
+                                                contentDescription = null,
+                                                tint = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        TextButton(onClick = {
+                            newModelInput = ""
+                            showAddNewModelDialog = true
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("+ Tambah Manual")
+                        }
+
+                        TextButton(onClick = { showModelsBottomSheet = false }) {
+                            Text("Tutup")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddNewModelDialog) {
+        Dialog(onDismissRequest = { showAddNewModelDialog = false }) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Tambah Model Baru",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    OutlinedTextField(
+                        value = newModelInput,
+                        onValueChange = { newModelInput = it },
+                        label = { Text("Nama atau Path Model") },
+                        placeholder = { Text("Contoh: llama-3.2-3b atau /path/to/model") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showAddNewModelDialog = false }) {
+                            Text("Batal")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val trimmed = newModelInput.trim()
+                                if (trimmed.isNotEmpty()) {
+                                    ollamaModelName = trimmed
+                                    if (!fetchedModels.contains(trimmed)) {
+                                        fetchedModels = listOf(trimmed) + fetchedModels
+                                    }
+                                    showAddNewModelDialog = false
+                                    Toast.makeText(context, "Model diatur ke $trimmed", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            enabled = newModelInput.trim().isNotEmpty()
+                        ) {
+                            Text("Gunakan Model")
+                        }
                     }
                 }
             }
