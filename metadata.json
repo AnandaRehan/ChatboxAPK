@@ -1,6 +1,0 @@
-{
-  "name": "Chatbox AI",
-  "description": "A modern AI Chat Client supporting Gemini and Ollama with Chat History, Markdown, and image attachments.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
