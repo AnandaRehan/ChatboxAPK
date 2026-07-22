@@ -178,6 +178,35 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
         }
     }
 
+    fun regenerateResponse(messageId: Long) {
+        val sessionId = _currentSessionId.value ?: return
+        isGenerating.value = true
+        viewModelScope.launch {
+            try {
+                repository.regenerateResponseForMessage(sessionId, messageId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to regenerate response", e)
+            } finally {
+                isGenerating.value = false
+            }
+        }
+    }
+
+    fun editAndRegenerateMessage(messageId: Long, newContent: String) {
+        val sessionId = _currentSessionId.value ?: return
+        if (newContent.trim().isEmpty()) return
+        isGenerating.value = true
+        viewModelScope.launch {
+            try {
+                repository.editAndRegenerateUserMessage(sessionId, messageId, newContent.trim())
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to edit and regenerate message", e)
+            } finally {
+                isGenerating.value = false
+            }
+        }
+    }
+
     fun exportChatAsMarkdown(context: Context) {
         val sessionId = _currentSessionId.value ?: return
         viewModelScope.launch(Dispatchers.Default) {

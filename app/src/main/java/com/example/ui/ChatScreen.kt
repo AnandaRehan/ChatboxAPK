@@ -1,5 +1,8 @@
 package com.example.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -8,6 +11,7 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,6 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -360,6 +366,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
                         MessageList(
                             messages = messages,
                             isGenerating = isGenerating,
+                            onRegenerate = { msgId -> viewModel.regenerateResponse(msgId) },
+                            onEditAndRegenerate = { msgId, newText -> viewModel.editAndRegenerateMessage(msgId, newText) },
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -674,12 +682,18 @@ fun WelcomePlaceholder(
 fun MessageList(
     messages: List<ChatMessage>,
     isGenerating: Boolean,
+    onRegenerate: (Long) -> Unit,
+    onEditAndRegenerate: (Long, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    val context = LocalContext.current
 
-    // Scroll to bottom when new messages arrive
-    LaunchedEffect(messages.size, isGenerating) {
+    var selectedMessageForOptions by remember { mutableStateOf<ChatMessage?>(null) }
+    var editingMessage by remember { mutableStateOf<ChatMessage?>(null) }
+
+    // Scroll to bottom as streaming content updates or new messages arrive
+    LaunchedEffect(messages.lastOrNull()?.content, messages.size, isGenerating) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
@@ -694,19 +708,249 @@ fun MessageList(
         contentPadding = PaddingValues(top = 10.dp, bottom = 20.dp)
     ) {
         items(messages) { message ->
-            MessageBubble(message = message)
+            MessageBubble(
+                message = message,
+                onLongClick = { selectedMessageForOptions = message }
+            )
         }
 
-        if (isGenerating) {
+        if (isGenerating && (messages.isEmpty() || messages.last().role.lowercase() == "user")) {
             item {
                 LoadingIndicatorBubble()
+            }
+        }
+    }
+
+    // Options Dialog on Long-Press
+    if (selectedMessageForOptions != null) {
+        val targetMsg = selectedMessageForOptions!!
+        val isUser = targetMsg.role.lowercase() == "user"
+
+        Dialog(onDismissRequest = { selectedMessageForOptions = null }) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = if (isUser) "Opsi Pertanyaan" else "Opsi Jawaban AI",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+
+                    if (isUser) {
+                        // 1. Tanya Ulang / Reload Jawaban
+                        OptionMenuItem(
+                            icon = Icons.Default.Refresh,
+                            title = "Tanya Ulang / Reload Jawaban",
+                            subtitle = "Jawab ulang pertanyaan ini dan gantikan jawaban AI sebelumnya",
+                            onClick = {
+                                val msgId = targetMsg.id
+                                selectedMessageForOptions = null
+                                onRegenerate(msgId)
+                            }
+                        )
+
+                        // 2. Edit Pertanyaan
+                        OptionMenuItem(
+                            icon = Icons.Default.Edit,
+                            title = "Edit Pertanyaan",
+                            subtitle = "Ubah teks pertanyaan dan minta AI menjawab kembali",
+                            onClick = {
+                                val msgToEdit = targetMsg
+                                selectedMessageForOptions = null
+                                editingMessage = msgToEdit
+                            }
+                        )
+
+                        // 3. Salin Teks Pertanyaan
+                        OptionMenuItem(
+                            icon = Icons.Default.ContentCopy,
+                            title = "Salin Teks Pertanyaan",
+                            subtitle = "Salin teks pertanyaan ini ke clipboard",
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val clip = ClipData.newPlainText("Pertanyaan", targetMsg.content)
+                                clipboard.setPrimaryClip(clip)
+                                Toast.makeText(context, "Teks pertanyaan disalin ke clipboard", Toast.LENGTH_SHORT).show()
+                                selectedMessageForOptions = null
+                            }
+                        )
+                    } else {
+                        // AI Answer Options
+                        OptionMenuItem(
+                            icon = Icons.Default.ContentCopy,
+                            title = "Salin Teks Jawaban",
+                            subtitle = "Salin teks jawaban AI ke clipboard",
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val clip = ClipData.newPlainText("Jawaban AI", targetMsg.content)
+                                clipboard.setPrimaryClip(clip)
+                                Toast.makeText(context, "Teks jawaban disalin ke clipboard", Toast.LENGTH_SHORT).show()
+                                selectedMessageForOptions = null
+                            }
+                        )
+
+                        OptionMenuItem(
+                            icon = Icons.Default.Refresh,
+                            title = "Generate Ulang Jawaban Ini",
+                            subtitle = "Minta AI menjawab kembali pertanyaan ini",
+                            onClick = {
+                                val msgId = targetMsg.id
+                                selectedMessageForOptions = null
+                                onRegenerate(msgId)
+                            }
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { selectedMessageForOptions = null }) {
+                            Text("Tutup", color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Edit Question Dialog
+    if (editingMessage != null) {
+        val targetMsgToEdit = editingMessage!!
+        var editedText by remember(targetMsgToEdit.id) { mutableStateOf(targetMsgToEdit.content) }
+
+        Dialog(onDismissRequest = { editingMessage = null }) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Edit Pertanyaan",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = editedText,
+                        onValueChange = { editedText = it },
+                        label = { Text("Pertanyaan Anda") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 100.dp, max = 220.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        maxLines = 6
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { editingMessage = null }) {
+                            Text("Batal")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val msgId = targetMsgToEdit.id
+                                val newText = editedText
+                                editingMessage = null
+                                onEditAndRegenerate(msgId, newText)
+                            },
+                            enabled = editedText.trim().isNotEmpty()
+                        ) {
+                            Text("Simpan & Tanya Ulang")
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun MessageBubble(message: ChatMessage) {
+fun OptionMenuItem(
+    icon: ImageVector,
+    title: String,
+    subtitle: String? = null,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(vertical = 10.dp, horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageBubble(
+    message: ChatMessage,
+    onLongClick: (ChatMessage) -> Unit
+) {
     val isUser = message.role.lowercase() == "user"
     val timeString = remember(message.timestamp) {
         val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
@@ -771,6 +1015,13 @@ fun MessageBubble(message: ChatMessage) {
                             )
                         } else Modifier
                     )
+                    .pointerInput(message.id) {
+                        detectTapGestures(
+                            onLongPress = {
+                                onLongClick(message)
+                            }
+                        )
+                    }
                     .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
                 Column {
@@ -799,10 +1050,30 @@ fun MessageBubble(message: ChatMessage) {
                             lineHeight = 20.sp
                         )
                     } else {
-                        MarkdownText(
-                            text = message.content,
-                            textColor = MaterialTheme.colorScheme.onSurface
-                        )
+                        if (message.content.isEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Sedang mengetik...",
+                                    fontSize = 13.sp,
+                                    fontStyle = FontStyle.Italic,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                )
+                            }
+                        } else {
+                            MarkdownText(
+                                text = message.content,
+                                textColor = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                 }
             }
@@ -1094,6 +1365,7 @@ fun SettingsDialog(
     
     var ollamaBaseUrl by remember { mutableStateOf(settings.ollamaBaseUrl) }
     var ollamaModelName by remember { mutableStateOf(settings.ollamaModelName) }
+    var ollamaImproveNetworkCompat by remember { mutableStateOf(settings.ollamaImproveNetworkCompat) }
     
     var customBaseUrl by remember { mutableStateOf(settings.customBaseUrl) }
     var customApiKey by remember { mutableStateOf(settings.customApiKey) }
@@ -1112,6 +1384,7 @@ fun SettingsDialog(
     val context = LocalContext.current
 
     val geminiModels = listOf(
+        "gemini-3.6-flash" to "Gemini 3.6 Flash",
         "gemini-3.5-flash" to "Gemini 3.5 Flash",
         "gemini-3.1-flash-lite-preview" to "Gemini 3.1 Flash Lite",
         "gemini-2.5-flash" to "Gemini 2.5 Flash",
@@ -1272,6 +1545,36 @@ fun SettingsDialog(
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                        Text(
+                                            text = "Improve Network Compatibility",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Abaikan SSL, paksa HTTP/1.1 & tambahkan header kustom untuk koneksi lokal/Termux/tunnel",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = ollamaImproveNetworkCompat,
+                                        onCheckedChange = { ollamaImproveNetworkCompat = it }
+                                    )
+                                }
                             }
                         }
                         "custom" -> {
@@ -1430,6 +1733,7 @@ fun SettingsDialog(
                             selectedModel = selectedModel,
                             ollamaBaseUrl = ollamaBaseUrl,
                             ollamaModelName = ollamaModelName,
+                            ollamaImproveNetworkCompat = ollamaImproveNetworkCompat,
                             customBaseUrl = customBaseUrl,
                             customApiKey = customApiKey,
                             customModelName = customModelName,

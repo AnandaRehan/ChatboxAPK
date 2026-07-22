@@ -26,6 +26,7 @@ data class AppSettings(
     val geminiApiKey: String = "",
     val ollamaBaseUrl: String = "http://10.0.2.2:11434", // Default Android emulator local host IP
     val ollamaModelName: String = "llama3",
+    val ollamaImproveNetworkCompat: Boolean = false,
     val customSystemPrompt: String = "You are a helpful and intelligent AI assistant.",
     val temperature: Float = 0.7f,
     val isDarkMode: Boolean = true,

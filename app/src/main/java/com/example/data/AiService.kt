@@ -11,6 +11,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -68,6 +71,7 @@ object AiService {
 
         val rawModel = settings.selectedModel.lowercase()
         val model = when {
+            rawModel.contains("3.6-flash") -> "gemini-3.6-flash"
             rawModel.contains("3.5-flash") -> "gemini-3.5-flash"
             rawModel.contains("3.1-flash") -> "gemini-3.1-flash-lite-preview"
             rawModel.contains("3-flash") -> "gemini-3-flash-preview"
@@ -198,19 +202,59 @@ object AiService {
         return "Respon dari Gemini kosong."
     }
 
+    private fun resolveOllamaUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return ""
+
+        val uri = try { java.net.URI(trimmed) } catch (e: Exception) { null }
+        val path = uri?.path ?: ""
+
+        return if (path.isEmpty() || path == "/") {
+            val base = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+            base + "api/chat"
+        } else {
+            trimmed
+        }
+    }
+
+    private fun getOkHttpClient(improveCompat: Boolean): OkHttpClient {
+        if (!improveCompat) return client
+
+        return try {
+            val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
+                object : javax.net.ssl.X509TrustManager {
+                    override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                    override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                }
+            )
+
+            val sslContext = javax.net.ssl.SSLContext.getInstance("SSL").apply {
+                init(null, trustAllCerts, java.security.SecureRandom())
+            }
+
+            OkHttpClient.Builder()
+                .connectTimeout(90, TimeUnit.SECONDS)
+                .readTimeout(90, TimeUnit.SECONDS)
+                .writeTimeout(90, TimeUnit.SECONDS)
+                .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+                .retryOnConnectionFailure(true)
+                .build()
+        } catch (e: Exception) {
+            client
+        }
+    }
+
     private suspend fun generateOllamaResponse(
         settings: AppSettings,
         history: List<ChatMessage>
     ): String {
-        var baseUrl = settings.ollamaBaseUrl.trim()
-        if (baseUrl.isEmpty()) {
+        val url = resolveOllamaUrl(settings.ollamaBaseUrl)
+        if (url.isEmpty()) {
             return "Error: Ollama Base URL is empty in Settings."
         }
-        // Ensure standard endpoint path is used
-        if (!baseUrl.endsWith("/")) {
-            baseUrl += "/"
-        }
-        val url = baseUrl + "api/chat"
 
         val rootJson = JSONObject()
         rootJson.put("model", settings.ollamaModelName)
@@ -245,14 +289,21 @@ object AiService {
         rootJson.put("options", options)
 
         val requestBodyStr = rootJson.toString()
-        Log.d(TAG, "Ollama Request: $requestBodyStr")
+        Log.d(TAG, "Ollama Request to $url: $requestBodyStr")
 
-        val request = Request.Builder()
+        val reqBuilder = Request.Builder()
             .url(url)
             .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
-            .build()
 
-        client.newCall(request).execute().use { response ->
+        if (settings.ollamaImproveNetworkCompat) {
+            reqBuilder.addHeader("User-Agent", "Mozilla/5.0 (Android; Mobile)")
+            reqBuilder.addHeader("Accept", "*/*")
+            reqBuilder.addHeader("Connection", "keep-alive")
+        }
+
+        val httpClient = getOkHttpClient(settings.ollamaImproveNetworkCompat)
+
+        httpClient.newCall(reqBuilder.build()).execute().use { response ->
             val responseBody = response.body?.string() ?: ""
             Log.d(TAG, "Ollama Response Code: ${response.code}, Body: $responseBody")
 
@@ -261,8 +312,16 @@ object AiService {
             }
 
             val respJson = JSONObject(responseBody)
-            val messageObj = respJson.optJSONObject("message")
-            return messageObj?.optString("content") ?: "Empty response from Ollama API."
+            val choices = respJson.optJSONArray("choices")
+            val textContent = if (choices != null && choices.length() > 0) {
+                val choice0 = choices.getJSONObject(0)
+                val msg = choice0.optJSONObject("message")
+                msg?.optString("content") ?: choice0.optString("text", "")
+            } else {
+                val messageObj = respJson.optJSONObject("message")
+                messageObj?.optString("content") ?: respJson.optString("response", "Empty response from Ollama API.")
+            }
+            return if (textContent.isNotEmpty()) textContent else "Respon dari Ollama kosong."
         }
     }
 
@@ -336,6 +395,379 @@ object AiService {
             return "No choices found in Custom API response."
         }
     }
+
+    fun generateChatResponseStream(
+        settings: AppSettings,
+        history: List<ChatMessage>,
+        latestImageB64: String? = null
+    ): Flow<String> {
+        val provider = settings.apiProvider
+        Log.d(TAG, "Generating streaming response using provider: $provider")
+        return when (provider.lowercase()) {
+            "gemini" -> generateGeminiStream(settings, history, latestImageB64)
+            "ollama" -> generateOllamaStream(settings, history)
+            "custom" -> generateCustomStream(settings, history)
+            else -> generateGeminiStream(settings, history, latestImageB64)
+        }
+    }
+
+    private fun generateGeminiStream(
+        settings: AppSettings,
+        history: List<ChatMessage>,
+        latestImageB64: String?
+    ): Flow<String> = flow {
+        val rawApiKey = settings.geminiApiKey.trim()
+        val apiKey = if (rawApiKey.isNotEmpty()) rawApiKey else {
+            try {
+                com.example.BuildConfig.GEMINI_API_KEY
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY" || apiKey == "null") {
+            emit("Maaf, API Key Google Gemini belum diatur. Silakan buka Pengaturan (ikon roda gigi) untuk memasukkan API Key Gemini Anda.")
+            return@flow
+        }
+
+        val rawModel = settings.selectedModel.lowercase()
+        var model = when {
+            rawModel.contains("3.6-flash") -> "gemini-3.6-flash"
+            rawModel.contains("3.5-flash") -> "gemini-3.5-flash"
+            rawModel.contains("3.1-flash") -> "gemini-3.1-flash-lite-preview"
+            rawModel.contains("3-flash") -> "gemini-3-flash-preview"
+            rawModel.contains("2.5-flash") -> "gemini-2.5-flash"
+            rawModel.contains("2.5-pro") -> "gemini-2.5-pro"
+            rawModel.contains("2.0-flash") -> "gemini-2.0-flash"
+            rawModel.contains("1.5-flash") -> "gemini-1.5-flash"
+            rawModel.contains("1.5-pro") -> "gemini-1.5-pro"
+            else -> settings.selectedModel.ifEmpty { "gemini-2.5-flash" }
+        }
+
+        fun buildUrl(targetModel: String) =
+            "https://generativelanguage.googleapis.com/v1beta/models/$targetModel:streamGenerateContent?key=$apiKey&alt=sse"
+
+        val rootJson = JSONObject()
+        val contentsArray = JSONArray()
+
+        for (i in history.indices) {
+            val msg = history[i]
+            val contentObj = JSONObject()
+            val geminiRole = if (msg.role.lowercase() == "user") "user" else "model"
+            contentObj.put("role", geminiRole)
+
+            val partsArray = JSONArray()
+            if (i == history.lastIndex && latestImageB64 != null) {
+                val imagePart = JSONObject().apply {
+                    put("inlineData", JSONObject().apply {
+                        put("mimeType", "image/jpeg")
+                        put("data", latestImageB64)
+                    })
+                }
+                partsArray.put(imagePart)
+            } else if (msg.imagePath != null) {
+                val base64 = loadAndEncodeImage(msg.imagePath)
+                if (base64 != null) {
+                    val imagePart = JSONObject().apply {
+                        put("inlineData", JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", base64)
+                        })
+                    }
+                    partsArray.put(imagePart)
+                }
+            }
+
+            val textPart = JSONObject().apply {
+                put("text", msg.content)
+            }
+            partsArray.put(textPart)
+
+            contentObj.put("parts", partsArray)
+            contentsArray.put(contentObj)
+        }
+
+        rootJson.put("contents", contentsArray)
+
+        if (settings.customSystemPrompt.isNotEmpty()) {
+            val systemInstruction = JSONObject().apply {
+                put("parts", JSONArray().put(JSONObject().apply {
+                    put("text", settings.customSystemPrompt)
+                }))
+            }
+            rootJson.put("systemInstruction", systemInstruction)
+        }
+
+        val config = JSONObject().apply {
+            put("temperature", settings.temperature)
+        }
+        rootJson.put("generationConfig", config)
+
+        val requestBodyStr = rootJson.toString()
+        Log.d(TAG, "Gemini Stream Request to $model")
+
+        var request = Request.Builder()
+            .url(buildUrl(model))
+            .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        var response = client.newCall(request).execute()
+
+        // Fallback to gemini-1.5-flash if 404
+        if (response.code == 404 && model != "gemini-1.5-flash") {
+            response.close()
+            model = "gemini-1.5-flash"
+            Log.d(TAG, "Retrying Gemini Stream with fallback model: $model")
+            request = Request.Builder()
+                .url(buildUrl(model))
+                .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            response = client.newCall(request).execute()
+        }
+
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            val errObj = try { JSONObject(errBody) } catch (e: Exception) { null }
+            val errMsg = errObj?.optJSONObject("error")?.optString("message") ?: "HTTP error ${response.code}"
+            emit("Gemini API Error: $errMsg")
+            response.close()
+            return@flow
+        }
+
+        val body = response.body ?: run {
+            emit("Respon dari Gemini kosong.")
+            response.close()
+            return@flow
+        }
+
+        val reader = body.charStream().buffered()
+        try {
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                val l = line?.trim() ?: continue
+                if (l.startsWith("data:")) {
+                    val jsonStr = l.removePrefix("data:").trim()
+                    if (jsonStr.isEmpty() || jsonStr == "[DONE]") continue
+                    try {
+                        val jsonObj = JSONObject(jsonStr)
+                        val candidates = jsonObj.optJSONArray("candidates")
+                        if (candidates != null && candidates.length() > 0) {
+                            val candidate = candidates.getJSONObject(0)
+                            val parts = candidate.optJSONObject("content")?.optJSONArray("parts")
+                            if (parts != null && parts.length() > 0) {
+                                for (p in 0 until parts.length()) {
+                                    val text = parts.getJSONObject(p).optString("text", "")
+                                    if (text.isNotEmpty()) {
+                                        emit(text)
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error parsing Gemini SSE chunk: $jsonStr", e)
+                    }
+                }
+            }
+        } finally {
+            reader.close()
+            response.close()
+        }
+    }.flowOn(Dispatchers.IO)
+
+    private fun generateOllamaStream(
+        settings: AppSettings,
+        history: List<ChatMessage>
+    ): Flow<String> = flow {
+        val url = resolveOllamaUrl(settings.ollamaBaseUrl)
+        if (url.isEmpty()) {
+            emit("Error: Ollama Base URL is empty in Settings.")
+            return@flow
+        }
+
+        val rootJson = JSONObject()
+        rootJson.put("model", settings.ollamaModelName)
+        rootJson.put("stream", true)
+
+        val messagesArray = JSONArray()
+
+        if (settings.customSystemPrompt.isNotEmpty()) {
+            val sysObj = JSONObject().apply {
+                put("role", "system")
+                put("content", settings.customSystemPrompt)
+            }
+            messagesArray.put(sysObj)
+        }
+
+        for (msg in history) {
+            val msgObj = JSONObject().apply {
+                put("role", if (msg.role.lowercase() == "user") "user" else "assistant")
+                put("content", msg.content)
+            }
+            messagesArray.put(msgObj)
+        }
+
+        rootJson.put("messages", messagesArray)
+
+        val options = JSONObject().apply {
+            put("temperature", settings.temperature)
+        }
+        rootJson.put("options", options)
+
+        val requestBodyStr = rootJson.toString()
+        Log.d(TAG, "Ollama Stream Request to $url: $requestBodyStr")
+
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
+
+        if (settings.ollamaImproveNetworkCompat) {
+            reqBuilder.addHeader("User-Agent", "Mozilla/5.0 (Android; Mobile)")
+            reqBuilder.addHeader("Accept", "*/*")
+            reqBuilder.addHeader("Connection", "keep-alive")
+        }
+
+        val httpClient = getOkHttpClient(settings.ollamaImproveNetworkCompat)
+
+        val response = httpClient.newCall(reqBuilder.build()).execute()
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            emit("Ollama API Error (Code ${response.code}): $errBody")
+            response.close()
+            return@flow
+        }
+
+        val body = response.body ?: run {
+            response.close()
+            return@flow
+        }
+
+        val reader = body.charStream().buffered()
+        try {
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                var l = line?.trim() ?: continue
+                if (l.isEmpty()) continue
+                if (l.startsWith("data:")) {
+                    l = l.removePrefix("data:").trim()
+                    if (l == "[DONE]" || l.isEmpty()) continue
+                }
+                try {
+                    val jsonObj = JSONObject(l)
+                    val choices = jsonObj.optJSONArray("choices")
+                    val content = if (choices != null && choices.length() > 0) {
+                        val choice0 = choices.getJSONObject(0)
+                        val delta = choice0.optJSONObject("delta")
+                        val msg = choice0.optJSONObject("message")
+                        delta?.optString("content", "") ?: msg?.optString("content", "") ?: ""
+                    } else {
+                        val messageObj = jsonObj.optJSONObject("message")
+                        messageObj?.optString("content") ?: jsonObj.optString("response", "")
+                    }
+                    if (content.isNotEmpty()) {
+                        emit(content)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing Ollama stream chunk: $l", e)
+                }
+            }
+        } finally {
+            reader.close()
+            response.close()
+        }
+    }.flowOn(Dispatchers.IO)
+
+    private fun generateCustomStream(
+        settings: AppSettings,
+        history: List<ChatMessage>
+    ): Flow<String> = flow {
+        var baseUrl = settings.customBaseUrl.trim()
+        if (baseUrl.isEmpty()) {
+            emit("Error: Custom API Base URL is empty in Settings.")
+            return@flow
+        }
+
+        if (!baseUrl.endsWith("/")) {
+            baseUrl += "/"
+        }
+        val url = if (baseUrl.contains("chat/completions")) baseUrl else baseUrl + "chat/completions"
+
+        val rootJson = JSONObject()
+        rootJson.put("model", settings.customModelName.ifEmpty { "custom-model" })
+        rootJson.put("stream", true)
+
+        val messagesArray = JSONArray()
+
+        if (settings.customSystemPrompt.isNotEmpty()) {
+            val sysObj = JSONObject().apply {
+                put("role", "system")
+                put("content", settings.customSystemPrompt)
+            }
+            messagesArray.put(sysObj)
+        }
+
+        for (msg in history) {
+            val msgObj = JSONObject().apply {
+                put("role", if (msg.role.lowercase() == "user") "user" else "assistant")
+                put("content", msg.content)
+            }
+            messagesArray.put(msgObj)
+        }
+
+        rootJson.put("messages", messagesArray)
+
+        val requestBodyStr = rootJson.toString()
+        Log.d(TAG, "Custom API Stream Request to $url: $requestBodyStr")
+
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
+
+        if (settings.customApiKey.isNotEmpty()) {
+            reqBuilder.addHeader("Authorization", "Bearer ${settings.customApiKey}")
+        }
+
+        val response = client.newCall(reqBuilder.build()).execute()
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            emit("Custom API Error (Code ${response.code}): $errBody")
+            response.close()
+            return@flow
+        }
+
+        val body = response.body ?: run {
+            response.close()
+            return@flow
+        }
+
+        val reader = body.charStream().buffered()
+        try {
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                val l = line?.trim() ?: continue
+                if (l.startsWith("data:")) {
+                    val jsonStr = l.removePrefix("data:").trim()
+                    if (jsonStr == "[DONE]") break
+                    if (jsonStr.isEmpty()) continue
+                    try {
+                        val jsonObj = JSONObject(jsonStr)
+                        val choices = jsonObj.optJSONArray("choices")
+                        if (choices != null && choices.length() > 0) {
+                            val delta = choices.getJSONObject(0).optJSONObject("delta")
+                            val content = delta?.optString("content", "") ?: ""
+                            if (content.isNotEmpty()) {
+                                emit(content)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error parsing Custom API SSE: $jsonStr", e)
+                    }
+                }
+            }
+        } finally {
+            reader.close()
+            response.close()
+        }
+    }.flowOn(Dispatchers.IO)
 
     private fun loadAndEncodeImage(path: String): String? {
         return try {

@@ -8,7 +8,7 @@ import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -95,23 +95,15 @@ class ChatRepository(
         // 4. Retrieve current Settings
         val settings = settingsDao.getSettingsOnce() ?: AppSettings()
 
-        // 5. Call AI Service with Exception Handling
-        val aiResponse = try {
-            AiService.generateChatResponse(settings, history, latestImageB64)
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception calling AiService", e)
-            "Maaf, terjadi kesalahan saat menghubungi AI: ${e.localizedMessage ?: "Tidak ada koneksi"}"
-        }
-
-        // 6. Insert AI Response to Database
+        // 5. Insert initial Assistant Message to Database (empty content)
         val assistantMessage = ChatMessage(
             sessionId = sessionId,
             role = "model",
-            content = aiResponse
+            content = ""
         )
-        chatDao.insertMessage(assistantMessage)
+        val assistantMsgId = chatDao.insertMessage(assistantMessage)
 
-        // 7. Auto-update session title if it's currently generic and this is the first turn
+        // 6. Auto-update session title if it's currently generic
         try {
             val session = chatDao.getSessionById(sessionId)
             if (session != null && (session.title == "Obrolan Baru" || session.title.trim().isEmpty())) {
@@ -122,11 +114,160 @@ class ChatRepository(
             Log.e(TAG, "Failed to auto-update session title", e)
         }
 
-        aiResponse
+        // 7. Stream AI Response and update assistant message in database in real-time
+        var accumulatedText = ""
+        var lastDbUpdate = System.currentTimeMillis()
+
+        try {
+            AiService.generateChatResponseStream(settings, history, latestImageB64)
+                .catch { e ->
+                    Log.e(TAG, "Exception during AI stream", e)
+                    val errText = "Maaf, terjadi kesalahan saat menghubungi AI: ${e.localizedMessage ?: "Tidak ada koneksi"}"
+                    accumulatedText = if (accumulatedText.isEmpty()) errText else "$accumulatedText\n\n[$errText]"
+                }
+                .collect { chunk ->
+                    accumulatedText += chunk
+                    val now = System.currentTimeMillis()
+                    if (now - lastDbUpdate > 40) { // throttle to ~40ms for smooth 25fps UI updates
+                        lastDbUpdate = now
+                        chatDao.insertMessage(
+                            ChatMessage(
+                                id = assistantMsgId,
+                                sessionId = sessionId,
+                                role = "model",
+                                content = accumulatedText
+                            )
+                        )
+                    }
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception calling AiService stream", e)
+            if (accumulatedText.isEmpty()) {
+                accumulatedText = "Maaf, terjadi kesalahan: ${e.localizedMessage}"
+            }
+        }
+
+        // Final DB update to guarantee complete text is written
+        val finalText = accumulatedText.ifEmpty { "Respon dari AI kosong." }
+        chatDao.insertMessage(
+            ChatMessage(
+                id = assistantMsgId,
+                sessionId = sessionId,
+                role = "model",
+                content = finalText
+            )
+        )
+
+        finalText
     }
 
     suspend fun clearAllMessagesInSession(sessionId: Long) = withContext(Dispatchers.IO) {
         chatDao.deleteMessagesForSession(sessionId)
+    }
+
+    suspend fun regenerateResponseForMessage(
+        sessionId: Long,
+        targetMessageId: Long
+    ): String = withContext(Dispatchers.IO) {
+        val allMessages = chatDao.getMessagesForSessionOnce(sessionId)
+        val targetIndex = allMessages.indexOfFirst { it.id == targetMessageId }
+        if (targetIndex == -1) return@withContext ""
+
+        val targetMsg = allMessages[targetIndex]
+        val userMsgIndex = if (targetMsg.role.lowercase() == "user") {
+            targetIndex
+        } else {
+            (targetIndex - 1 downTo 0).firstOrNull { allMessages[it].role.lowercase() == "user" } ?: -1
+        }
+
+        if (userMsgIndex == -1) return@withContext ""
+        val userMsg = allMessages[userMsgIndex]
+
+        val history = allMessages.subList(0, userMsgIndex + 1)
+        val latestImageB64 = userMsg.imagePath?.let { path ->
+            encodeImageToBase64(path)
+        }
+
+        var assistantMsgId: Long = -1L
+        if (userMsgIndex + 1 < allMessages.size && allMessages[userMsgIndex + 1].role.lowercase() == "model") {
+            assistantMsgId = allMessages[userMsgIndex + 1].id
+        }
+
+        if (assistantMsgId == -1L) {
+            val newAssistantMsg = ChatMessage(
+                sessionId = sessionId,
+                role = "model",
+                content = ""
+            )
+            assistantMsgId = chatDao.insertMessage(newAssistantMsg)
+        } else {
+            chatDao.insertMessage(
+                ChatMessage(
+                    id = assistantMsgId,
+                    sessionId = sessionId,
+                    role = "model",
+                    content = ""
+                )
+            )
+        }
+
+        val settings = settingsDao.getSettingsOnce() ?: AppSettings()
+
+        var accumulatedText = ""
+        var lastDbUpdate = System.currentTimeMillis()
+
+        try {
+            AiService.generateChatResponseStream(settings, history, latestImageB64)
+                .catch { e ->
+                    Log.e(TAG, "Exception during AI stream regeneration", e)
+                    val errText = "Maaf, terjadi kesalahan saat menghubungi AI: ${e.localizedMessage ?: "Tidak ada koneksi"}"
+                    accumulatedText = if (accumulatedText.isEmpty()) errText else "$accumulatedText\n\n[$errText]"
+                }
+                .collect { chunk ->
+                    accumulatedText += chunk
+                    val now = System.currentTimeMillis()
+                    if (now - lastDbUpdate > 40) {
+                        lastDbUpdate = now
+                        chatDao.insertMessage(
+                            ChatMessage(
+                                id = assistantMsgId,
+                                sessionId = sessionId,
+                                role = "model",
+                                content = accumulatedText
+                            )
+                        )
+                    }
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception calling AiService stream regeneration", e)
+            if (accumulatedText.isEmpty()) {
+                accumulatedText = "Maaf, terjadi kesalahan: ${e.localizedMessage}"
+            }
+        }
+
+        val finalText = accumulatedText.ifEmpty { "Respon dari AI kosong." }
+        chatDao.insertMessage(
+            ChatMessage(
+                id = assistantMsgId,
+                sessionId = sessionId,
+                role = "model",
+                content = finalText
+            )
+        )
+
+        finalText
+    }
+
+    suspend fun editAndRegenerateUserMessage(
+        sessionId: Long,
+        userMessageId: Long,
+        newContent: String
+    ): String = withContext(Dispatchers.IO) {
+        val allMessages = chatDao.getMessagesForSessionOnce(sessionId)
+        val userMsg = allMessages.find { it.id == userMessageId } ?: return@withContext ""
+
+        chatDao.insertMessage(userMsg.copy(content = newContent))
+        regenerateResponseForMessage(sessionId, userMessageId)
     }
 
     private fun copyImageToInternalStorage(context: Context, uri: Uri): String? {
