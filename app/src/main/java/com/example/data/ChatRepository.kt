@@ -95,8 +95,13 @@ class ChatRepository(
         // 4. Retrieve current Settings
         val settings = settingsDao.getSettingsOnce() ?: AppSettings()
 
-        // 5. Call AI Service
-        val aiResponse = AiService.generateChatResponse(settings, history, latestImageB64)
+        // 5. Call AI Service with Exception Handling
+        val aiResponse = try {
+            AiService.generateChatResponse(settings, history, latestImageB64)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception calling AiService", e)
+            "Maaf, terjadi kesalahan saat menghubungi AI: ${e.localizedMessage ?: "Tidak ada koneksi"}"
+        }
 
         // 6. Insert AI Response to Database
         val assistantMessage = ChatMessage(

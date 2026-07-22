@@ -33,7 +33,7 @@ data class AppSettings(
     val cloudSyncUrl: String = "https://sync.example.com",
     val cloudSyncPassword: String = "",
     val apiProvider: String = "gemini", // "gemini", "ollama", "custom"
-    val selectedModel: String = "gemini-3.5-flash",
+    val selectedModel: String = "gemini-2.5-flash",
     val customBaseUrl: String = "",
     val customApiKey: String = "",
     val customModelName: String = "custom-model"

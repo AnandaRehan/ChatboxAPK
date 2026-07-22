@@ -53,8 +53,8 @@ object AiService {
         history: List<ChatMessage>,
         latestImageB64: String?
     ): String {
-        val apiKey = settings.geminiApiKey.ifEmpty {
-            // Fallback to BuildConfig if empty
+        val rawApiKey = settings.geminiApiKey.trim()
+        val apiKey = if (rawApiKey.isNotEmpty()) rawApiKey else {
             try {
                 com.example.BuildConfig.GEMINI_API_KEY
             } catch (e: Exception) {
@@ -62,12 +62,25 @@ object AiService {
             }
         }
 
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            return "Error: Gemini API Key is missing. Please set it in Settings."
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY" || apiKey == "null") {
+            return "Maaf, API Key Google Gemini belum diatur. Silakan buka Pengaturan (ikon roda gigi) untuk memasukkan API Key Gemini Anda."
         }
 
-        val model = settings.selectedModel
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        val rawModel = settings.selectedModel.lowercase()
+        val model = when {
+            rawModel.contains("3.5-flash") -> "gemini-3.5-flash"
+            rawModel.contains("3.1-flash") -> "gemini-3.1-flash-lite-preview"
+            rawModel.contains("3-flash") -> "gemini-3-flash-preview"
+            rawModel.contains("2.5-flash") -> "gemini-2.5-flash"
+            rawModel.contains("2.5-pro") -> "gemini-2.5-pro"
+            rawModel.contains("2.0-flash") -> "gemini-2.0-flash"
+            rawModel.contains("1.5-flash") -> "gemini-1.5-flash"
+            rawModel.contains("1.5-pro") -> "gemini-1.5-pro"
+            else -> settings.selectedModel.ifEmpty { "gemini-2.5-flash" }
+        }
+
+        fun buildRequestUrl(targetModel: String) =
+            "https://generativelanguage.googleapis.com/v1beta/models/$targetModel:generateContent?key=$apiKey"
 
         val rootJson = JSONObject()
         val contentsArray = JSONArray()
@@ -137,32 +150,52 @@ object AiService {
         val requestBodyStr = rootJson.toString()
         Log.d(TAG, "Gemini Request to $model: $requestBodyStr")
 
-        val request = Request.Builder()
-            .url(url)
+        var request = Request.Builder()
+            .url(buildRequestUrl(model))
             .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
+        var responseBody = ""
+        var responseCode = 0
+
         client.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string() ?: ""
-            Log.d(TAG, "Gemini Response Code: ${response.code}, Body: $responseBody")
-
-            if (!response.isSuccessful) {
-                val errObj = try { JSONObject(responseBody) } catch (e: Exception) { null }
-                val errMsg = errObj?.optJSONObject("error")?.optString("message") ?: "HTTP error ${response.code}"
-                return "Gemini API Error: $errMsg"
-            }
-
-            val respJson = JSONObject(responseBody)
-            val candidates = respJson.optJSONArray("candidates")
-            if (candidates != null && candidates.length() > 0) {
-                val candidate = candidates.getJSONObject(0)
-                val parts = candidate.optJSONObject("content")?.optJSONArray("parts")
-                if (parts != null && parts.length() > 0) {
-                    return parts.getJSONObject(0).optString("text", "No text in candidate")
-                }
-            }
-            return "Empty response from Gemini API."
+            responseCode = response.code
+            responseBody = response.body?.string() ?: ""
         }
+
+        // If initial request failed due to model issue, fallback to gemini-2.5-flash or gemini-1.5-flash
+        if (responseCode == 404 && model != "gemini-1.5-flash") {
+            val fallbackModel = "gemini-1.5-flash"
+            Log.d(TAG, "Retrying Gemini with fallback model: $fallbackModel")
+            request = Request.Builder()
+                .url(buildRequestUrl(fallbackModel))
+                .post(requestBodyStr.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                responseCode = response.code
+                responseBody = response.body?.string() ?: ""
+            }
+        }
+
+        Log.d(TAG, "Gemini Response Code: $responseCode, Body: $responseBody")
+
+        if (responseCode !in 200..299) {
+            val errObj = try { JSONObject(responseBody) } catch (e: Exception) { null }
+            val errMsg = errObj?.optJSONObject("error")?.optString("message") ?: "HTTP error $responseCode"
+            return "Gemini API Error: $errMsg"
+        }
+
+        val respJson = JSONObject(responseBody)
+        val candidates = respJson.optJSONArray("candidates")
+        if (candidates != null && candidates.length() > 0) {
+            val candidate = candidates.getJSONObject(0)
+            val parts = candidate.optJSONObject("content")?.optJSONArray("parts")
+            if (parts != null && parts.length() > 0) {
+                return parts.getJSONObject(0).optString("text", "No text response")
+            }
+        }
+        return "Respon dari Gemini kosong."
     }
 
     private suspend fun generateOllamaResponse(

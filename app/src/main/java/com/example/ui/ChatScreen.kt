@@ -353,7 +353,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             activeModelName = if (settings.apiProvider == "gemini") settings.selectedModel else settings.ollamaModelName,
                             onStartSamplePrompt = {
                                 viewModel.updateInputText(it)
-                            }
+                            },
+                            modifier = Modifier.weight(1f)
                         )
                     } else {
                         MessageList(
@@ -577,11 +578,12 @@ fun SidebarContent(
 fun WelcomePlaceholder(
     activeProviderName: String,
     activeModelName: String,
-    onStartSamplePrompt: (String) -> Unit
+    onStartSamplePrompt: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Box(
-        modifier = Modifier
-            .fillMaxSize()
+        modifier = modifier
+            .fillMaxWidth()
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -1113,11 +1115,10 @@ fun SettingsDialog(
         "gemini-3.5-flash" to "Gemini 3.5 Flash",
         "gemini-3.1-flash-lite-preview" to "Gemini 3.1 Flash Lite",
         "gemini-2.5-flash" to "Gemini 2.5 Flash",
-        "gemini-2.5-flash-lite-preview" to "Gemini 2.5 Flash Lite",
         "gemini-2.5-pro" to "Gemini 2.5 Pro",
-        "gemini-3-flash-preview" to "Gemini 3 Flash Preview",
-        "gemini-2.5-flash-image" to "Nano Banana",
-        "gemini-3-pro-image-preview" to "Nano Banana Pro"
+        "gemini-2.0-flash" to "Gemini 2.0 Flash",
+        "gemini-1.5-flash" to "Gemini 1.5 Flash",
+        "gemini-1.5-pro" to "Gemini 1.5 Pro"
     )
 
     Dialog(
@@ -1326,20 +1327,22 @@ fun SettingsDialog(
                             modifier = Modifier.fillMaxWidth()
                         )
 
-                        Column {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Temperature (Kreativitas):", fontSize = 12.sp)
-                                Text(String.format("%.1f", temperature), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        if (apiProvider == "ollama") {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Temperature (Khusus Ollama):", fontSize = 12.sp)
+                                    Text(String.format("%.1f", temperature), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = temperature,
+                                    onValueChange = { temperature = it },
+                                    valueRange = 0.0f..1.0f,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
-                            Slider(
-                                value = temperature,
-                                onValueChange = { temperature = it },
-                                valueRange = 0.0f..1.0f,
-                                modifier = Modifier.fillMaxWidth()
-                            )
                         }
                     }
 
